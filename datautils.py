@@ -90,7 +90,8 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
 
 def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
     model_name = model.split('/')[-1]
-    cache_file=f'/mnt/afs/yliao/Tasks/moe/Expert_Quant/moeq/cache/{name}_{nsamples}_{seed}_{seqlen}/Mixtral-8x7B-v0.1.pt'
+    cache_root = os.environ.get('HF_HOME', os.path.expanduser('~/.cache/huggingface'))
+    cache_file = f'{cache_root}/mcmoe_cache/{name}_{nsamples}_{seed}_{seqlen}/{model_name}.pt'
     try:
         test_enc = torch.load(cache_file)
         return test_enc

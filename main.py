@@ -115,7 +115,8 @@ def mixtral_sequential(model, dataloader, dev, bit_config=None):
     position_ids = cache['position_ids']
     print('Ready.')
     quantizers = {}
-    for i in range(len(layers)):
+    max_layers = getattr(args, 'max_layers', None) or len(layers)
+    for i in range(min(len(layers), max_layers)):
 
         print(f'Quantizing layer {i+1}/{len(layers)}..')
         print('+--------------------------------+------------+------------+------------+---------+')
@@ -359,11 +360,38 @@ if __name__ == "__main__":
         "--precisions", type=str, help="the file path of experts precision"
     )
     parser.add_argument(
+        "--gptq_backend",
+        choices=["pytorch", "triton", "triton_graph"],
+        default="triton",
+        help="GPTQ inner-loop backend. 'triton' (default; MC-MoE-consistent "
+             "find_params + Triton inner loop; matches `--pack --save` "
+             "deployment-quality quantization) / 'triton_graph' (+CUDA Graph) "
+             "/ 'pytorch' (original upstream path, includes a buggy MSE "
+             "metric when --pack is off).",
+    )
+    parser.add_argument(
+        "--inner_rank1",
+        choices=["legacy", "always", "never"],
+        default="legacy",
+        help="Inner rank-1 propagation policy for the Triton path. "
+             "'legacy' = apply only when wbits > 3 (matches MC-MoE PyTorch); "
+             "'always' = standard GPTQ; 'never' = pure column-wise quantize.",
+    )
+    parser.add_argument(
+        "--max_layers", type=int, default=None,
+        help="Quantize only the first N decoder layers (debug). Default: all 32.",
+    )
+    parser.add_argument(
         "--saving_path", type=str, help="the saving path of quantized model"
     )
 
     args = parser.parse_args()
     print(f'Arguments: {args}')
+
+    GPTQ.triton_backend = args.gptq_backend
+    GPTQ.force_inner_rank1 = {
+        'legacy': None, 'always': True, 'never': False,
+    }[args.inner_rank1]
 
     groupsize = args.groupsize
     args.wbits = int(args.wbits[0])
@@ -392,18 +420,31 @@ if __name__ == "__main__":
         seqlen=model.seqlen,
     )
     device = "cuda:0"
+
+    # Save the calibration sequences so we can also report PPL on them
+    # (i.e., the same 128*seqlen tokens the GPTQ Hessian was built from).
+    calib_input_ids = torch.cat([inp for inp, _ in dataloader], dim=1)
+
     tick = time.time()
     quantizers = mixtral_sequential(model, dataloader, device, bit_config)
     print("quantization time:", time.time() - tick, "s")
     print(model)
 
     if args.eval_ppl:
-        for dataset in ["wikitext2", "c4", "ptb"]:
+        from eval_ppl_utils import llama_eval
+        import types
+        # Calibration-set PPL: same tokens GPTQ minimized error on.
+        print(f"calib-set ({args.dataset}_train, n={args.nsamples}, seq={model.seqlen})")
+        calib_enc = types.SimpleNamespace(input_ids=calib_input_ids)
+        t1 = time.time()
+        llama_eval(model, calib_enc, device, f"{args.dataset}_calib")
+        print("Time: ", time.time() - t1)
+
+        for dataset in ["wikitext2", "c4"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, seqlen=2048, model=args.model
             )
             print(dataset)
-            from eval_ppl_utils import llama_eval
             t1 = time.time()
             llama_eval(model, testloader, device, dataset)
             print("Time: ", time.time() - t1)

@@ -66,17 +66,12 @@ def layerwise_experts_weights_frequencies(model: MixtralForCausalLM, calib_loade
         b = layer.block_sparse_moe
         if not hasattr(b, 'cache_space'):
             continue
-        if l < 16:
-            b.to('cuda:0')
-        else:
-            b.to('cuda:1')
-        # b.to('cuda:0')
+        # Only reading 8-element stats tensors; no need to move the (multi-GB)
+        # block back onto a fixed GPU. Upstream pinned cuda:0/cuda:1 on a
+        # 2-GPU 32-layer setup, which OOMs / mis-shards on 8x22B (56 layers,
+        # device_map='auto' sharded across 4 GPUs).
         weights_tensor[l] = b.weights_tensor.to('cpu')
         frequencies_tensor[l] = b.number_tensor.to('cpu')
-
-        print(weights_tensor[l])
-        # b.prune()
-        b.to('cpu')
 
     import pickle
     with open("experts_act_weight.pkl", "wb") as f:

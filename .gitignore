@@ -1,0 +1,19 @@
+# Experiment outputs / scratch
+exps/
+runs/
+output/
+results/
+
+# Datasets
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# uv / venv
+.venv/
+
+# Misc
+*.log
+.DS_Store
