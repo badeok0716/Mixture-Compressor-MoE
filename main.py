@@ -330,7 +330,11 @@ if __name__ == "__main__":
         action="store_true",
     )
     parser.add_argument(
-        "--pack", action="store_true", help="Whether to save the packed model."
+        "--pack", action=argparse.BooleanOptionalAction, default=True,
+        help="Activate quantizer pack=True branch (standard MSE search + QLinear "
+             "wrap for deployment-quality dequant). Default ON for paper-equivalent "
+             "PPL. Use --no-pack for the upstream `--pack`-off fake-quant path "
+             "(which runs a buggy MSE metric — see CLAUDE.md).",
     )
     parser.add_argument(
         "--use_flash_attention_2", action="store_true", help="Whether to use flash_attention2 for inference."
@@ -362,12 +366,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gptq_backend",
         choices=["pytorch", "triton", "triton_graph"],
-        default="triton",
-        help="GPTQ inner-loop backend. 'triton' (default; MC-MoE-consistent "
-             "find_params + Triton inner loop; matches `--pack --save` "
-             "deployment-quality quantization) / 'triton_graph' (+CUDA Graph) "
-             "/ 'pytorch' (original upstream path, includes a buggy MSE "
-             "metric when --pack is off).",
+        default="pytorch",
+        help="GPTQ inner-loop backend. 'pytorch' (default; upstream MC-MoE) "
+             "/ 'triton' (Triton kernel + MC-MoE-consistent find_params; "
+             "1.7× faster but ~0.1-0.4 PPL drift vs pytorch + --pack) "
+             "/ 'triton_graph' (+CUDA Graph).",
     )
     parser.add_argument(
         "--inner_rank1",
@@ -382,7 +385,9 @@ if __name__ == "__main__":
         help="Quantize only the first N decoder layers (debug). Default: all 32.",
     )
     parser.add_argument(
-        "--saving_path", type=str, help="the saving path of quantized model"
+        "--saving_path", type=str, default="/storage/deokjae/mcmoe_checkpoint",
+        help="parent directory to write packed quantized models into; one "
+             "subdir per (model, attn_bits, expert_avg) combo is created.",
     )
 
     args = parser.parse_args()
@@ -449,8 +454,28 @@ if __name__ == "__main__":
             llama_eval(model, testloader, device, dataset)
             print("Time: ", time.time() - t1)
     if args.save:
-        average_bits = int(args.precisions[-9:-7])/8
-        saving_path = args.saving_path + f"Mixtral-8x7B-v0.1-atten_{args.attn_bits}-e_{average_bits}"
+        # Robustly derive expert-avg bit for the dir name. Three cases:
+        #   (a) mixed_type=mixed/manual/random with effavg_<T.TTT>.pkl
+        #       (bit_selection_correct) → T (already the layer-wise effective avg)
+        #   (b) mixed_type=mixed/manual/random with combination_<NN>bit.pkl
+        #       (legacy bit_selection) → N/8 (nominal avg, not effective)
+        #   (c) mixed_type=uniform, or precisions pkl with non-standard name
+        #       (e.g. experts_mixture_bitwidth_uniform.pkl) → args.wbits
+        import re
+        m_eff = re.search(r"effavg_(\d+\.\d+)\.pkl$", args.precisions or "")
+        m_old = re.search(r"(\d+)bit\.pkl$", args.precisions or "")
+        if m_eff is not None:
+            average_bits = float(m_eff.group(1))
+        elif args.mixed_type == "uniform" or m_old is None:
+            average_bits = float(args.wbits)
+        else:
+            average_bits = int(m_old.group(1)) / 8
+        model_name = os.path.basename(args.model.rstrip("/"))
+        saving_path = os.path.join(
+            args.saving_path,
+            f"{model_name}-atten_{args.attn_bits}-e_{average_bits}",
+        )
+        os.makedirs(saving_path, exist_ok=True)
         tokenizer = AutoTokenizer.from_pretrained(args.model)
         tokenizer.save_pretrained(saving_path)
         from utils.pack import save_quantized
